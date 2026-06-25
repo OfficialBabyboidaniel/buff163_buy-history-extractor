@@ -71,13 +71,18 @@
 <div class="section">
   <div class="btn-row">
     <button class="btn btn-secondary" id="btn-validate">✓ Validate</button>
-    <button class="btn btn-primary"   id="btn-fetch"   disabled>⬇ Fetch All</button>
-    <button class="btn btn-secondary" id="btn-stop"    disabled>■ Stop</button>
+    <button class="btn btn-primary"   id="btn-fetch"       disabled>⬇ Fetch All</button>
+    <button class="btn btn-green"     id="btn-fetch-today" disabled>⬇ Today</button>
+    <button class="btn btn-secondary" id="btn-stop"        disabled>■ Stop</button>
   </div>
   <div class="btn-row" style="margin-top:8px">
     <button class="btn btn-green" id="btn-csv"   disabled>↓ CSV</button>
     <button class="btn btn-blue"  id="btn-xlsx"  disabled>↓ Excel</button>
     <button class="btn btn-secondary" id="btn-debug" disabled>⚙ Raw JSON</button>
+  </div>
+  <div class="btn-row" style="margin-top:8px">
+    <button class="btn btn-secondary" id="btn-tracker-csv"  disabled>↓ Tracker CSV</button>
+    <button class="btn btn-secondary" id="btn-tracker-copy" disabled>⧉ Copy to Clipboard</button>
   </div>
   <div class="resume-note" id="resume-note" style="display:none">
     ⚡ Checkpoint found: <b id="resume-count">0</b> orders saved. Resume or start fresh.

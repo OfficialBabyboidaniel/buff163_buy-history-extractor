@@ -24,12 +24,16 @@ const progressLabel  = document.getElementById('progress-label');
 const logEl          = document.getElementById('log');
 const btnValidate    = document.getElementById('btn-validate');
 const btnFetch       = document.getElementById('btn-fetch');
+const btnFetchToday  = document.getElementById('btn-fetch-today');
 const btnStop        = document.getElementById('btn-stop');
 const btnCsv         = document.getElementById('btn-csv');
 const btnXlsx        = document.getElementById('btn-xlsx');
 const resumeNote     = document.getElementById('resume-note');
 const resumeCount    = document.getElementById('resume-count');
 const btnDebug       = document.getElementById('btn-debug');
+const btnClearCkpt   = document.getElementById('btn-clear-checkpoint');
+const btnTrackerCsv  = document.getElementById('btn-tracker-csv');
+const btnTrackerCopy = document.getElementById('btn-tracker-copy');
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 function log(msg, type = '') {
@@ -58,15 +62,18 @@ function updateStats(fetched, total, page) {
 }
 
 function setBusy(busy) {
-  btnValidate.disabled = busy;
-  btnFetch.disabled    = busy;
-  btnStop.disabled     = !busy;
+  btnValidate.disabled     = busy;
+  btnFetch.disabled        = busy;
+  btnFetchToday.disabled   = busy;
+  btnStop.disabled         = !busy;
 }
 
 function setExportReady(yes) {
-  btnCsv.disabled   = !yes;
-  btnXlsx.disabled  = !yes;
-  btnDebug.disabled = !yes;
+  btnCsv.disabled          = !yes;
+  btnXlsx.disabled         = !yes;
+  btnDebug.disabled        = !yes;
+  btnTrackerCsv.disabled   = !yes;
+  btnTrackerCopy.disabled  = !yes;
 }
 
 // ─── Cookie helper ────────────────────────────────────────────────────────────
@@ -124,6 +131,7 @@ async function validateSession() {
     setStatus('ok', `Logged in — ${total.toLocaleString()} csgo purchases found`);
     log(`Session valid. ${total} orders in csgo.`, 'ok');
     btnFetch.disabled = false;
+    btnFetchToday.disabled = false;
   } catch (e) {
     setStatus('err', 'Not logged in — open buff.163.com and sign in');
     log(`Session invalid: ${e.message}`, 'err');
@@ -133,15 +141,19 @@ async function validateSession() {
 }
 
 // ─── Main fetch loop ──────────────────────────────────────────────────────────
-async function fetchAllOrders() {
+async function fetchAllOrders(todayOnly = false) {
   stopFlag  = false;
   allOrders = [];
 
-  // Try to restore checkpoint
-  const saved = await loadCheckpoint();
-  if (saved.length) {
-    allOrders = saved;
-    log(`Resumed from checkpoint: ${allOrders.length} orders`, 'info');
+  const todayStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+  // Try to restore checkpoint (skip for today-only — we want a clean slate)
+  if (!todayOnly) {
+    const saved = await loadCheckpoint();
+    if (saved.length) {
+      allOrders = saved;
+      log(`Resumed from checkpoint: ${allOrders.length} orders`, 'info');
+    }
   }
 
   setBusy(true);
@@ -165,14 +177,21 @@ async function fetchAllOrders() {
         const items = (data.items || []).map(o => ({ ...o, _game: game }));
         if (!items.length) break;
 
-        // Log raw structure of first item on first page so we can see all fields
-        if (page === 1 && allOrders.length === 0) {
-          log('RAW first item keys: ' + Object.keys(items[0]).join(', '), 'info');
-          if (items[0].goods_info) log('goods_info keys: ' + Object.keys(items[0].goods_info).join(', '), 'info');
-          if (items[0].goods)      log('goods keys: ' + Object.keys(items[0].goods).join(', '), 'info');
+        if (todayOnly) {
+          const todayItems = items.filter(o => {
+            const d = o.created_at ? new Date(o.created_at * 1000).toISOString().slice(0, 10) : '';
+            return d === todayStr;
+          });
+          allOrders.push(...todayItems);
+          // If any item is older than today, stop paginating this game
+          const hasOlder = items.some(o => {
+            const d = o.created_at ? new Date(o.created_at * 1000).toISOString().slice(0, 10) : '';
+            return d < todayStr;
+          });
+          if (hasOlder) break;
+        } else {
+          allOrders.push(...items);
         }
-
-        allOrders.push(...items);
         // Deduplicate by id
         allOrders = [...new Map(allOrders.map(o => [o.id, o])).values()];
 
@@ -385,6 +404,59 @@ function buildSummarySheet(rows) {
   return XLSX.utils.json_to_sheet(summaryData);
 }
 
+// ─── Tracker export (Skin, CNY, EUR, SEK, Date) ───────────────────────────────
+async function getRates() {
+  try {
+    const resp = await fetch('https://api.frankfurter.app/latest?from=CNY&to=EUR,SEK');
+    const json = await resp.json();
+    return { eur: json.rates.EUR, sek: json.rates.SEK };
+  } catch (e) {
+    log('Could not fetch exchange rates — using fallback rates', 'err');
+    return { eur: 0.1288, sek: 1.414 };
+  }
+}
+
+function buildTrackerRows(rates) {
+  return allOrders.map(o => {
+    const goodsId = o.goods_id || o.asset_info?.goods_id || '';
+    const cached  = goodsCache[goodsId] || {};
+    const cny     = parseFloat(o.price || o.list_page_price || o.real_price) || 0;
+    const date    = o.created_at ? new Date(o.created_at * 1000).toISOString().slice(0, 10) : '';
+    return {
+      'Skin':              cached.name || '',
+      'Buy Price (¥)':     cny,
+      'Buy Price (€)':     +(cny * rates.eur).toFixed(2),
+      'Buy Price (SEK)':   +(cny * rates.sek).toFixed(2),
+      'Buy Date':          date,
+    };
+  });
+}
+
+async function exportTrackerCSV() {
+  if (!allOrders.length) return;
+  log('Fetching exchange rates…', 'info');
+  const rates   = await getRates();
+  const rows    = buildTrackerRows(rates);
+  const headers = Object.keys(rows[0]);
+  const csv = [
+    headers.join(','),
+    ...rows.map(r => headers.map(h => `"${String(r[h]).replace(/"/g, '""')}"`).join(','))
+  ].join('\n');
+  download('\uFEFF' + csv, 'buff163_tracker.csv', 'text/csv');
+  log(`Tracker CSV exported (1¥ = €${rates.eur} / ${rates.sek}kr).`, 'ok');
+}
+
+async function copyTrackerToClipboard() {
+  if (!allOrders.length) return;
+  log('Fetching exchange rates…', 'info');
+  const rates   = await getRates();
+  const rows    = buildTrackerRows(rates);
+  const headers = Object.keys(rows[0]);
+  const tsv = rows.map(r => headers.map(h => r[h]).join('\t')).join('\n');
+  await navigator.clipboard.writeText(tsv);
+  log(`${rows.length} rows copied (1¥ = €${rates.eur} / ${rates.sek}kr) — paste into your sheet!`, 'ok');
+}
+
 // ─── Download helper ──────────────────────────────────────────────────────────
 function download(content, filename, mime) {
   const blob = new Blob([content], { type: mime });
@@ -420,11 +492,14 @@ async function init() {
 
 // ─── Event listeners ──────────────────────────────────────────────────────────
 btnValidate.addEventListener('click', validateSession);
-btnFetch.addEventListener('click', fetchAllOrders);
+btnFetch.addEventListener('click', () => fetchAllOrders(false));
+btnFetchToday.addEventListener('click', () => fetchAllOrders(true));
 btnStop.addEventListener('click', () => { stopFlag = true; log('Stopping after current page…', 'err'); });
 btnCsv.addEventListener('click', exportCSV);
 btnXlsx.addEventListener('click', exportXLSX);
 btnDebug.addEventListener('click', exportDebug);
 btnClearCkpt.addEventListener('click', clearCheckpoint);
+btnTrackerCsv.addEventListener('click', exportTrackerCSV);
+btnTrackerCopy.addEventListener('click', copyTrackerToClipboard);
 
 init();
