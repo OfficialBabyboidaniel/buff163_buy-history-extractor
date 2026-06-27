@@ -211,6 +211,7 @@ async function fetchAllOrders(todayOnly = false) {
     } else {
       log(`Done! ${allOrders.length} total orders. Now fetching item names…`, 'ok');
       await enrichGoodsNames();
+      allOrders.reverse(); // oldest first for all exports
       setStatus('ok', `Complete — ${allOrders.length} orders`);
     }
   } catch (e) {
