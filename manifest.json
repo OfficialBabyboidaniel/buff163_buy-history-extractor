@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "BUFF163 Purchase Exporter",
+  "version": "1.0.0",
+  "description": "Export your complete BUFF163 purchase history to CSV and Excel.",
+  "permissions": ["storage", "downloads", "cookies", "clipboardWrite", "tabs"],
+  "host_permissions": ["https://buff.163.com/*", "https://api.frankfurter.app/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "BUFF163 Exporter"
+  }
+}
