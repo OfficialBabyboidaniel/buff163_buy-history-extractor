@@ -94,6 +94,11 @@
     <button class="btn btn-secondary" id="btn-tracker-csv"  disabled>↓ Tracker CSV</button>
     <button class="btn btn-secondary" id="btn-tracker-copy" disabled>⧉ Copy to Clipboard</button>
   </div>
+  <div class="btn-row" style="margin-top:8px">
+    <button class="btn btn-green" id="btn-sync-today"  disabled>⇪ Sync Today</button>
+    <button class="btn btn-green" id="btn-sync-week"   disabled>⇪ Sync Week</button>
+    <button class="btn btn-green" id="btn-sync-month"  disabled>⇪ Sync Month</button>
+  </div>
   <div class="resume-note" id="resume-note" style="display:none">
     ⚡ Checkpoint found: <b id="resume-count">0</b> orders saved. Resume or start fresh.
     <button class="btn btn-secondary" style="margin-top:4px;flex:none;width:100%" id="btn-clear-checkpoint">Clear checkpoint</button>
@@ -102,6 +107,7 @@
 </div>
 
 <script src="lib/xlsx.full.min.js"></script>
+<script src="config.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

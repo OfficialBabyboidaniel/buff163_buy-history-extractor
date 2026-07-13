@@ -39,6 +39,9 @@ const btnDebug       = document.getElementById('btn-debug');
 const btnClearCkpt   = document.getElementById('btn-clear-checkpoint');
 const btnTrackerCsv  = document.getElementById('btn-tracker-csv');
 const btnTrackerCopy = document.getElementById('btn-tracker-copy');
+const btnSyncToday   = document.getElementById('btn-sync-today');
+const btnSyncWeek    = document.getElementById('btn-sync-week');
+const btnSyncMonth   = document.getElementById('btn-sync-month');
 
 // ─── Logging ─────────────────────────────────────────────────────────────────
 function log(msg, type = '') {
@@ -82,6 +85,9 @@ function setExportReady(yes) {
   btnDebug.disabled        = !yes;
   btnTrackerCsv.disabled   = !yes;
   btnTrackerCopy.disabled  = !yes;
+  btnSyncToday.disabled    = !yes;
+  btnSyncWeek.disabled     = !yes;
+  btnSyncMonth.disabled    = !yes;
 }
 
 // ─── Cookie helper ────────────────────────────────────────────────────────────
@@ -152,7 +158,7 @@ async function validateSession() {
 }
 
 // ─── Main fetch loop ──────────────────────────────────────────────────────────
-async function fetchAllOrders(dateFrom = null, dateTo = null) {
+async function fetchAllOrders(dateFrom = null, dateTo = null, { silent = false } = {}) {
   stopFlag  = false;
   allOrders = [];
 
@@ -236,7 +242,7 @@ async function fetchAllOrders(dateFrom = null, dateTo = null) {
     setStatus('err', `Error — ${allOrders.length} orders saved`);
   }
 
-  setBusy(false);
+  if (!silent) setBusy(false);
   if (allOrders.length) setExportReady(true);
 }
 
@@ -497,6 +503,169 @@ async function copyTrackerToClipboard() {
   log(`${rows.length} rows copied (1¥ = €${rates.eur} / ${rates.sek}kr) — paste into your sheet!`, 'ok');
 }
 
+// ─── Google Sheets sync ───────────────────────────────────────────────────────
+const SHEETS_API = 'https://sheets.googleapis.com/v4/spreadsheets';
+
+async function getGoogleToken(interactive = true) {
+  return new Promise((resolve, reject) => {
+    chrome.identity.getAuthToken({ interactive }, token => {
+      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+      else resolve(token);
+    });
+  });
+}
+
+function matchKey(name, float) {
+  if (!float || float === 'null' || float === '') return `${name}||nofloat`;
+  const f = parseFloat(float);
+  if (isNaN(f)) return `${name}||nofloat`;
+  return `${name}||${f.toFixed(6)}`;
+}
+
+async function syncToSheet(dateFrom = null, dateTo = null) {
+  setBusy(true);
+  setStatus('yellow', 'Syncing to sheet…');
+
+  try {
+    const cfg = (typeof CONFIG !== 'undefined') ? CONFIG : {};
+    const sheetId  = cfg.sheetId  || '';
+    const sheetTab = cfg.sheetTab || 'Investment';
+
+    if (!sheetId) throw new Error('No Sheet ID in config.js');
+
+    // 1. Fetch orders for the date range automatically
+    log(`Fetching orders (${dateFrom} → ${dateTo})…`, 'info');
+    await fetchAllOrders(dateFrom, dateTo, { silent: true });
+
+    if (!allOrders.length) {
+      log('No orders found for this date range.', 'err');
+      setBusy(false);
+      setStatus('ok', 'Nothing to sync');
+      return;
+    }
+
+    // 2. Exchange rates
+    log('Fetching exchange rates…', 'info');
+    const rates = await getRates();
+    log(`Rates: 1¥ = €${rates.eur} / ${rates.sek}kr`, 'info');
+
+    // 3. Build rows from loaded orders filtered by date range
+    const fromStr = dateFrom || '1970-01-01';
+    const toStr   = dateTo   || new Date().toISOString().slice(0, 10);
+    const ordersInRange = allOrders.filter(o => {
+      if (!dateFrom && !dateTo) return true;
+      const d = o.created_at ? new Date(o.created_at * 1000).toISOString().slice(0, 10) : '';
+      return d >= fromStr && d <= toStr;
+    });
+
+    if (!ordersInRange.length) {
+      log('No orders in selected date range.', 'err');
+      setBusy(false);
+      setStatus('ok', 'Nothing to sync');
+      return;
+    }
+
+    const trackerRows = ordersInRange.map(o => {
+      const goodsId = o.goods_id || o.asset_info?.goods_id || '';
+      const cached  = goodsCache[goodsId] || {};
+      const ai      = o.asset_info || {};
+      const cny     = parseFloat(o.price || o.list_page_price || o.real_price) || 0;
+      const date    = o.created_at ? new Date(o.created_at * 1000).toISOString().slice(0, 10) : '';
+      const float   = ai.paintwear ? String(ai.paintwear) : '';
+      return {
+        name:    cached.name || '',
+        buyCny:  cny,
+        buyEur:  +(cny * rates.eur).toFixed(2),
+        buySek:  +(cny * rates.sek).toFixed(2),
+        buyDate: date,
+        float,
+      };
+    }).filter(r => {
+      if (!r.name) {
+        log(`⚠️ Skipping order with no item name — run "Fetch All" first to load names`, 'err');
+        return false;
+      }
+      return true;
+    });
+
+    log(`${trackerRows.length} orders to sync (${fromStr} → ${toStr})`, 'info');
+
+    // 3. Read existing sheet to deduplicate
+    log('Reading sheet to check for duplicates…', 'info');
+    const token = await getGoogleToken(true);
+    const range = encodeURIComponent(`${sheetTab}!A:J`);
+    const resp  = await fetch(`${SHEETS_API}/${sheetId}/values/${range}`, {
+      headers: { 'Authorization': `Bearer ${token}` }
+    });
+    if (!resp.ok) throw new Error(`Sheets read error: HTTP ${resp.status}`);
+    const json     = await resp.json();
+    const existing = json.values || [];
+
+    // Build set of already-synced keys (name+float)
+    const existingKeys = new Set();
+    for (let i = 1; i < existing.length; i++) {
+      const row   = existing[i];
+      const name  = (row[0] || '').toString().trim();
+      const float = (row[9] || '').toString().trim(); // col J
+      if (name) existingKeys.add(matchKey(name, float));
+    }
+    log(`Sheet has ${existing.length - 1} existing rows`, 'info');
+
+    // Filter to only new rows
+    const newRows = trackerRows.filter(r => !existingKeys.has(matchKey(r.name, r.float)));
+    const skipped = trackerRows.length - newRows.length;
+    if (skipped) log(`Skipped ${skipped} already-synced rows`, 'info');
+
+    if (!newRows.length) {
+      log('All rows already in sheet — nothing new to add.', 'ok');
+      setStatus('ok', 'Already up to date');
+      setBusy(false);
+      return;
+    }
+
+    // 4. Append new rows after last occupied row
+    // Columns: A=Name, B=Buy¥, C=Buy€, D=BuySEK, E=BuyDate, F-I empty (sell cols), J=Float
+    const appendValues = newRows.map(r => [
+      r.name,    // A
+      r.buyCny,  // B
+      r.buyEur,  // C
+      r.buySek,  // D
+      r.buyDate, // E
+      '',        // F — Sell€ (empty, filled by skinport-sync later)
+      '',        // G — SellSEK
+      '',        // H — SellUSD
+      '',        // I — SellDate
+      r.float,   // J — Float
+    ]);
+
+    const appendRange = encodeURIComponent(`${sheetTab}!A:J`);
+    const appendResp  = await fetch(
+      `${SHEETS_API}/${sheetId}/values/${appendRange}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      {
+        method:  'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type':  'application/json',
+        },
+        body: JSON.stringify({ values: appendValues }),
+      }
+    );
+    if (!appendResp.ok) {
+      const err = await appendResp.text();
+      throw new Error(`Sheets append error: ${err}`);
+    }
+
+    log(`✓ Appended ${newRows.length} new rows to sheet`, 'ok');
+    setStatus('ok', `Synced ${newRows.length} rows`);
+
+  } catch (e) {
+    log(`Sync error: ${e.message}`, 'err');
+    setStatus('err', e.message);
+  }
+
+  setBusy(false);
+}
+
 // ─── Download helper ──────────────────────────────────────────────────────────
 function download(content, filename, mime) {
   const blob = new Blob([content], { type: mime });
@@ -560,5 +729,19 @@ btnDebug.addEventListener('click', exportDebug);
 btnClearCkpt.addEventListener('click', clearCheckpoint);
 btnTrackerCsv.addEventListener('click', exportTrackerCSV);
 btnTrackerCopy.addEventListener('click', copyTrackerToClipboard);
+btnSyncToday.addEventListener('click', () => {
+  const today = new Date().toISOString().slice(0, 10);
+  syncToSheet(today, today);
+});
+btnSyncWeek.addEventListener('click', () => {
+  const to   = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 6 * 86400000).toISOString().slice(0, 10);
+  syncToSheet(from, to);
+});
+btnSyncMonth.addEventListener('click', () => {
+  const to   = new Date().toISOString().slice(0, 10);
+  const from = new Date(Date.now() - 29 * 86400000).toISOString().slice(0, 10);
+  syncToSheet(from, to);
+});
 
 init();
